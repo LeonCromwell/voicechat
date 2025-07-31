@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>voicechat2</title>
+
+    <!-- <script src="https://cdn.jsdelivr.net/npm/symbl-opus-encdec@0.1.2/src/recorder.min.js"></script> -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.7/dist/bundle.min.js"></script>
+    <script
+      src="https://storage.googleapis.com/cyberfans/opus-encdec/recorder.min.js"
+      type="text/javascript"
+    ></script>
+    
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        background-color: #f0f0f0;
+      }
+      .container {
+        text-align: center;
+        background-color: white;
+        padding: 2rem;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        max-width: 800px;
+        width: 100%;
+      }
+      #status,
+      #timer,
+      #latency {
+        margin-top: 1rem;
+        font-weight: bold;
+      }
+      #logArea {
+        width: 100%;
+        height: 400px;
+        margin-top: 1rem;
+        padding: 0.5rem;
+        border: 1px solid #ccc;
+        overflow-y: auto;
+        text-align: left;
+        font-family: monospace;
+        font-size: 0.9rem;
+      }
+      #conversationLog {
+        width: 100%;
+        height: 300px;
+        border: 1px solid #ccc;
+        overflow-y: auto;
+        margin-top: 1rem;
+        padding: 0.5rem;
+        font-family: Arial, sans-serif;
+      }
+      .user-message {
+        color: blue;
+      }
+      .ai-message {
+        color: green;
+      }
+      #latencyMetrics {
+        margin-top: 10px;
+        font-size: 0.9em;
+        font-family: monospace;
+      }
+      #latencyMetrics table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      #latencyMetrics th,
+      #latencyMetrics td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+      }
+      #latencyMetrics th {
+        background-color: #f2f2f2;
+        font-weight: bold;
+      }
+
+      button {
+        display: block;
+        font-size: 1rem;
+        padding: 0.5rem 1rem;
+        margin: 1rem auto;
+        width: 18rem;
+        cursor: pointer;
+      }
+      button {
+        user-select: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+      }
+      button:active {
+        background-color: #ff0000;
+        color: white;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>voicechat2</h1>
+      <div id="timer">00:00:000</div>
+      <button id="vadToggle">Enable Voice Auto Detection</button>
+      <button id="recordButton">Press and Hold to Chat</button>
+      <p>You can also hold the space bar to chat!</p>
+      <div id="latencyMetrics">
+        <table>
+          <tr>
+            <th>Metric</th>
+            <th>Value</th>
+          </tr>
+          <tr>
+            <td>Total Voice-to-Voice</td>
+            <td id="totalVoiceToVoice">0ms</td>
+          </tr>
+          <tr>
+            <td>SRT Duration</td>
+            <td id="srtDuration">0ms</td>
+          </tr>
+          <tr>
+            <td>LLM TTFT</td>
+            <td id="llmTTFT">0ms</td>
+          </tr>
+          <tr>
+            <td>LLM TTFS</td>
+            <td id="llmTTFS">0ms</td>
+          </tr>
+          <tr>
+            <td>TTS Duration</td>
+            <td id="ttsDuration">0ms</td>
+          </tr>
+          <tr>
+            <td>Network Latency</td>
+            <td id="networkLatency">0ms</td>
+          </tr>
+        </table>
+      </div>
+      <div id="status">Ready</div>
+      <div id="conversationLog"></div>
+      <div id="logArea"></div>
+    </div>
+
+    <script>
+      // Elements to update
+      const vadToggle = document.getElementById("vadToggle");
+      const recordButton = document.getElementById("recordButton");
+      const status = document.getElementById("status");
+      const logArea = document.getElementById("logArea");
+      const timerDisplay = document.getElementById("timer");
+
+      // Network
+      let startTime;
+      let socket;
+      let isProcessing = false;
+      let latencyIntervalId = null;
+      let ping = null;
+
+      // Recording
+      let isRecording = false;
+      let recordingStartTime;
+      let recorder;
+      let timerInterval;
+
+      // VAD
+      let isVADEnabled = false;
+      let myvad;
+
+      // Text
+      let currentAIResponse = "";
+      let aiMessageElement = null;
+      let isAIResponding = false;
+
+      // Playback
+      let audioQueue = [];
+      let isPlaying = false;
+
+      // Ping every second
+      function startLatencyMeasurement() {
+        if (latencyIntervalId === null) {
+          latencyIntervalId = setInterval(measureLatency, 1000);
+        }
+      }
+
+      function stopLatencyMeasurement() {
+        if (latencyIntervalId !== null) {
+          clearInterval(latencyIntervalId);
+          latencyIntervalId = null;
+        }
+      }
+
+      function measureLatency() {
+        if (!isProcessing) {
+          ping = performance.now();
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }
+
+      function updateLatencyDisplay(latency) {
+        const latencyElement = document.getElementById("networkLatency");
+        if (latencyElement) {
+          latencyElement.textContent = `${latency.toFixed(2)}ms`;
+        }
+      }
+
+      // VAD
+      vadToggle.addEventListener("click", toggleVAD);
+      async function toggleVAD() {
+        if (isVADEnabled) {
+          isVADEnabled = false;
+          vadToggle.textContent = "Enable Voice Auto Detection";
+          vadToggle.style.background = "";
+          vadToggle.style.color = "";
+          if (myvad) {
+            await myvad.pause();
+            // myvad = null;
+          }
+          updateStatus("VAD disabled");
+        } else {
+          isVADEnabled = true;
+          vadToggle.textContent = "Disable Voice Auto Detection";
+          vadToggle.style.background = "red";
+          vadToggle.style.color = "white";
+          initializeVAD();
+          updateStatus("VAD enabled");
+        }
+      }
+      async function startVAD() {
+        if (isVADEnabled) {
+          if (myvad) {
+            await myvad.start();
+          }
+          updateStatus("VAD enabled");
+        }
+
+        updateStatuss;
+      }
+      async function pauseVAD() {
+        if (isVADEnabled) {
+          if (myvad) {
+            await myvad.pause();
+          }
+          updateStatus("VAD paused");
+        }
+      }
+
+      function ensureWebSocketOpen() {
+        return new Promise((resolve) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            resolve();
+          } else {
+            socket.addEventListener("open", () => resolve(), { once: true });
+          }
+        });
+      }
+
+      // START monkeypatch
+      Recorder.prototype.encodeAudio = function(audioFloat32Array) {
+        return new Promise((resolve, reject) => {
+          // Store the original callbacks
+          const originalOndataavailable = this.ondataavailable;
+          const originalOnstart = this.onstart;
+          const originalOnstop = this.onstop;
+
+          let encodedChunks = [];
+
+          this.ondataavailable = (typedArray) => {
+            encodedChunks.push(typedArray);
+          };
+
+          this.onstart = () => {
+            // When recording starts, send the audio data to the encoder
+            if (this.encoder && this.encoder.postMessage) {
+              this.encoder.postMessage({
+                command: 'encode',
+                buffers: [audioFloat32Array]
+              });
+            }
+          };
+
+          this.onstop = () => {
+            // Combine all chunks into a single Blob
+            const opusBlob = new Blob(encodedChunks, { type: 'audio/ogg; codecs=opus' });
+
+            // Restore original callbacks
+            this.ondataavailable = originalOndataavailable;
+            this.onstart = originalOnstart;
+            this.onstop = originalOnstop;
+
+            resolve(opusBlob);
+          };
+
+          // Start and immediately stop the recorder to trigger the encoding process
+          this.start().then(() => {
+            this.stop();
+          }).catch(reject);
+        });
+      };
+      // END monkeypatch
+
+      async function initializeVAD() {
+        try {
+          if (!myvad) {
+            myvad = await vad.MicVAD.new({
+              onSpeechEnd: async (audio) => {
+                let opusBlob;
+
+                console.log("Speech ended, audio length:", audio.length);
+
+                clearInterval(timerInterval);
+
+                try {
+                  opusBlob = await recorder.encodeAudio(audio);
+                  console.log("Encoding complete, blob size:", opusBlob.size);
+
+                  // Ensure WebSocket is open, reinitialize if necessary
+                  if (!socket || socket.readyState !== WebSocket.OPEN) {
+                    log("WebSocket is not open. Reinitializing...");
+                    try {
+                      await initializeWebSocketAsync();
+                    } catch (error) {
+                      log(`Error reinitializing WebSocket: ${error.message}`);
+                      return;
+                    }
+                  }
+
+                  if (socket && socket.readyState === WebSocket.OPEN) {
+                    log(`Sending audio file: ${opusBlob.size} bytes`);
+                    socket.send(opusBlob);
+                    log("Audio file sent successfully");
+                    // Send stop_recording message
+                    socket.send(JSON.stringify({ action: "stop_recording" }));
+                    log("Sent stop_recording message");
+                  } else {
+                    log("WebSocket is not open. Cannot send audio.");
+                  }
+                } catch (error) {
+                  console.error("Error encoding audio:", error);
+                }
+              },
+              onVADMisfire: () => {
+                log("VAD misfire detected");
+              },
+            });
+          }
+          await myvad.start();
+          updateStatus("VAD initialized and started");
+        } catch (error) {
+          console.error("Error initializing VAD:", error);
+          updateStatus("Error initializing VAD");
+        }
+      }
+
+      function updateStatus(message) {
+        status.textContent = message;
+      }
+
+      function startRecording() {
+        if (!isRecording) {
+          stopLatencyMeasurement();
+
+          // Clear the previous AI response when starting a new recording
+          currentAIResponse = "";
+          aiMessageElement = null;
+          isAIResponding = false;
+
+          isRecording = true;
+          recordingStartTime = Date.now();
+          updateTimerDisplay();
+          recorder.start();
+          document.getElementById("status").textContent = "Recording...";
+        }
+      }
+
+      async function stopRecording() {
+        if (isRecording) {
+          isRecording = false;
+          try {
+            await recorder.stop();
+            log("Recording stopped successfully");
+            document.getElementById("status").textContent = "Processing...";
+            recordingEndTime = Date.now();
+
+            // Ensure WebSocket is open, reinitialize if necessary
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+              log("WebSocket is not open. Reinitializing...");
+              try {
+                await initializeWebSocketAsync();
+              } catch (error) {
+                log(`Error reinitializing WebSocket: ${error.message}`);
+                return;
+              }
+            }
+
+            // Send stop_recording message to server
+            const stopMessage = JSON.stringify({ action: "stop_recording" });
+            log(`Sending stop_recording message: ${stopMessage}`);
+            socket.send(stopMessage);
+          } catch (error) {
+            log(`Error stopping recording: ${error.message}`);
+          }
+        }
+      }
+
+      function updateTimerDisplay() {
+        if (isRecording) {
+          const elapsed = Date.now() - recordingStartTime;
+          const minutes = Math.floor(elapsed / 60000);
+          const seconds = Math.floor((elapsed % 60000) / 1000);
+          const milliseconds = elapsed % 1000;
+          timerDisplay.textContent = `${minutes
+            .toString()
+            .padStart(2, "0")}:${seconds
+            .toString()
+            .padStart(2, "0")}:${milliseconds.toString().padStart(3, "0")}`;
+          requestAnimationFrame(updateTimerDisplay);
+        }
+      }
+
+      // Button event listeners
+      recordButton.addEventListener("mousedown", startRecording);
+      recordButton.addEventListener("mouseup", stopRecording);
+      recordButton.addEventListener("mouseleave", stopRecording);
+
+      // Spacebar event listeners
+      document.addEventListener("keydown", (event) => {
+        if (event.code === "Space" && !isRecording) {
+          event.preventDefault(); // Prevent scrolling
+          startRecording();
+        }
+      });
+
+      document.addEventListener("keyup", (event) => {
+        if (event.code === "Space") {
+          event.preventDefault();
+          stopRecording();
+        }
+      });
+
+      // Touch event listeners for mobile devices
+      recordButton.addEventListener("touchstart", (event) => {
+        event.preventDefault();
+        startRecording();
+      });
+
+      recordButton.addEventListener("touchend", (event) => {
+        event.preventDefault();
+        stopRecording();
+      });
+
+      function playNextAudio() {
+        if (!isPlaying) {
+          startVAD();
+        }
+
+        if (audioQueue.length === 0 || isPlaying) {
+          return;
+        }
+
+        isPlaying = true;
+        pauseVAD();
+
+        const audioBlob = audioQueue.shift();
+        const audio = new Audio(URL.createObjectURL(audioBlob));
+
+        audio.onended = () => {
+          isPlaying = false;
+          playNextAudio(); // Play the next audio in the queue
+        };
+
+        audio.onerror = (error) => {
+          log(`Error playing audio: ${error.message}`);
+          isPlaying = false;
+          playNextAudio(); // Try to play the next audio in case of an error
+        };
+
+        audio.play().catch((error) => {
+          log(`Error starting audio playback: ${error.message}`);
+          isPlaying = false;
+          playNextAudio(); // Try to play the next audio in case of an error
+        });
+      }
+
+      function queueAudioForPlayback(audioBlob) {
+        audioQueue.push(audioBlob);
+        playNextAudio(); // Try to play if not already playing
+      }
+
+      function log(message) {
+        const timestamp = new Date().toISOString();
+        logArea.innerHTML = `${timestamp} - ${message}<br>` + logArea.innerHTML;
+      }
+
+      function updateTimer() {
+        const elapsed = Date.now() - startTime;
+        const minutes = Math.floor(elapsed / 60000);
+        const seconds = Math.floor((elapsed % 60000) / 1000);
+        const milliseconds = elapsed % 1000;
+        timerDisplay.textContent = `${minutes
+          .toString()
+          .padStart(2, "0")}:${seconds
+          .toString()
+          .padStart(2, "0")}:${milliseconds.toString().padStart(3, "0")}`;
+      }
+
+      let audioContext = new (window.AudioContext || window.webkitAudioContext)(
+        { sampleRate: 16000 }
+      );
+
+      async function createSourceNode() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+          return audioContext.createMediaStreamSource(stream);
+        } catch {
+          // If we don't resample then recording will be 48K, 4x too slow...
+          recordButton.style.display = "None";
+          audioContext = new (window.AudioContext ||
+            window.webkitAudioContext)();
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+          return audioContext.createMediaStreamSource(stream);
+        }
+      }
+
+      async function initializeRecorder() {
+        const sourceNode = await createSourceNode();
+        const config = {
+          numberOfChannels: 1,
+          encoderSampleRate: 16000,
+          encoderFrameSize: 20,
+          maxFramesPerPage: 40,
+          encoderComplexity: 6,
+          encoderApplication: 2048, // Voice
+          originalSampleRate: 16000,
+          streamPages: true,
+          sourceNode: sourceNode,
+        };
+
+        recorder = new window.Recorder(config);
+
+        recorder.ondataavailable = (typedArray) => {
+          log(`Data available: ${typedArray.length} bytes`);
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(typedArray);
+          }
+        };
+
+        let audioChunks = [];
+
+        recorder.ondataavailable = (typedArray) => {
+          log(`Data available: ${typedArray.length} bytes`);
+          audioChunks.push(typedArray);
+        };
+
+        recorder.onstart = () => {
+          log("Recording started");
+          status.textContent = "Recording...";
+          startTime = Date.now();
+          timerInterval = setInterval(updateTimer, 10);
+        };
+
+        recorder.onstop = () => {
+          log("Recording stopped");
+          status.textContent = "Processing...";
+          clearInterval(timerInterval);
+          const blob = new Blob(audioChunks, {
+            type: "audio/ogg; codecs=opus",
+          });
+          log(audioChunks);
+          audioChunks = []; // Clear the chunks for the next recording'
+
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            log(`Sending audio file: ${blob.size} bytes`);
+            socket.send(blob);
+          } else {
+            log("WebSocket is not open. Cannot send audio.");
+          }
+        };
+      }
+
+      function playAudio(audioBlob) {
+        const audio = new Audio(URL.createObjectURL(audioBlob));
+        audio.play();
+      }
+
+      function initializeWebSocketAsync() {
+        return new Promise((resolve, reject) => {
+          let currentUrl = window.location;
+          let wsProtocol = currentUrl.protocol === "https:" ? "wss:" : "ws:";
+          let wsUrl = `${wsProtocol}//${currentUrl.host}/ws`;
+          socket = new WebSocket(wsUrl);
+
+          socket.onopen = () => {
+            log("WebSocket connected");
+            status.textContent = "Ready";
+            recordButton.disabled = false;
+            startLatencyMeasurement();
+            resolve(socket);
+          };
+
+          socket.onclose = (event) => {
+            log(
+              `WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason}`
+            );
+            status.textContent = "Disconnected";
+            recordButton.disabled = true;
+            stopLatencyMeasurement();
+            reject(new Error("WebSocket closed"));
+          };
+
+          socket.onerror = (error) => {
+            log(`WebSocket error: ${error.message}`);
+            status.textContent = "Error";
+            reject(error);
+          };
+
+          socket.onmessage = (event) => {
+            log(`Received message from server: ${typeof event.data}`);
+            if (event.data instanceof Blob) {
+              // Handle audio data
+              queueAudioForPlayback(event.data);
+            } else {
+              // Handle JSON messages
+              try {
+                const message = JSON.parse(event.data);
+
+                // Don't spam logs...
+                if (message.type !== "pong") {
+                  log(`Parsed server message: ${JSON.stringify(message)}`);
+                }
+
+                if (message.type === "pong") {
+                  const latency = performance.now() - ping;
+                  // console.log(`Current network latency: ${latency.toFixed(2)}ms`);
+                  updateLatencyDisplay(latency);
+                } else if (message.type === "text") {
+                  // Handle streamed text from LLM
+                  updateAIResponse(message.content);
+                } else if (message.type === "transcription") {
+                  // Handle transcribed user input
+                  displayMessage("User", message.content);
+                  // Reset AI response for new turn
+                  currentAIResponse = "";
+                  aiMessageElement = null;
+                  isAIResponding = true;
+                } else if (message.type === "first_audio_response") {
+                  firstResponseTime = Date.now();
+                } else if (message.type === "latency_metrics") {
+                  updateLatencyMetrics(message.metrics);
+                } else if (message.type === "processing_complete") {
+                  status.textContent = "Ready";
+                  isProcessing = false;
+                  startLatencyMeasurement;
+                  isAIResponding = false;
+                  // Remove the cursor
+                  if (aiMessageElement) {
+                    const cursor = aiMessageElement.querySelector(".ai-cursor");
+                    if (cursor) cursor.remove();
+                  }
+                } else if (message.type === "error") {
+                  log(`Error from server: ${message.message}`);
+                  status.textContent = "Error";
+                }
+              } catch (error) {
+                log(`Error parsing server message: ${error.message}`);
+              }
+            }
+          };
+        });
+      }
+
+      function updateLatencyMetrics(metrics) {
+        document.getElementById("totalVoiceToVoice").textContent = `${(
+          metrics.total_voice_to_voice * 1000
+        ).toFixed(1)}ms`;
+        document.getElementById("srtDuration").textContent = `${(
+          metrics.srt_duration * 1000
+        ).toFixed(1)}ms`;
+        document.getElementById("llmTTFT").textContent = `${(
+          metrics.llm_ttft * 1000
+        ).toFixed(1)}ms`;
+        document.getElementById("llmTTFS").textContent = `${(
+          metrics.llm_ttfs * 1000
+        ).toFixed(1)}ms`;
+        document.getElementById("ttsDuration").textContent = `${(
+          metrics.tts_duration * 1000
+        ).toFixed(1)}ms`;
+      }
+
+      function displayMessage(role, content) {
+        const conversationLog = document.getElementById("conversationLog");
+        const messageElement = document.createElement("p");
+        messageElement.className = role.toLowerCase() + "-message";
+        messageElement.textContent = `${role}: ${content}`;
+        conversationLog.appendChild(messageElement);
+        conversationLog.scrollTop = conversationLog.scrollHeight;
+        return messageElement;
+      }
+
+      function updateAIResponse(newContent) {
+        currentAIResponse += newContent;
+        if (!aiMessageElement) {
+          aiMessageElement = displayMessage("AI", "");
+        }
+        aiMessageElement.innerHTML = `AI: ${currentAIResponse}${
+          isAIResponding ? '<span class="ai-cursor"></span>' : ""
+        }`;
+        const conversationLog = document.getElementById("conversationLog");
+        conversationLog.scrollTop = conversationLog.scrollHeight;
+      }
+
+      let recordingEndTime;
+      let firstResponseTime;
+
+      // Initialize recorder and WebSocket when the page loads
+      window.onload = async () => {
+        await initializeRecorder();
+        await recorder.initialize;
+        console.log("Recorder object:", recorder);
+        console.log("Encoder object:", recorder.encoder);
+
+        try {
+          await initializeWebSocketAsync();
+          log("Application initialized");
+        } catch (error) {
+          log(`Error initializing application: ${error.message}`);
+        }
+      };
+    </script>
+  </body>
+</html>

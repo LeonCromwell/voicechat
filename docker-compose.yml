@@ -1,0 +1,48 @@
+version: "3.7"
+services:
+  voicechat2:
+    container_name: voicechat2
+    image: cybarfans-voice:latest
+    build:
+      context: .
+      dockerfile: dockerfile
+    env_file:
+      - .env
+    environment:
+      PROJECT_NAME: CyberFans
+      TZ: "Asia/Ho_Chi_Minh"
+    ports:
+      - "8004:8004"
+    command: ["uvicorn", "voicechat2:app", "--host", "0.0.0.0", "--port", "8004"]
+    restart: unless-stopped
+
+  srt-server:
+    container_name: srt-server
+    image: cybarfans-voice:latest
+    depends_on:
+      - voicechat2
+    env_file:
+      - .env
+    environment:
+      PROJECT_NAME: CyberFans
+      TZ: "Asia/Ho_Chi_Minh"
+    ports:
+      - "8005:8005"
+    command: ["uvicorn", "srt-server:app", "--host", "0.0.0.0", "--port", "8005"]
+    restart: unless-stopped
+  
+  tts-server:
+    container_name: tts-server
+    image: cybarfans-voice:latest
+    depends_on:
+      - voicechat2
+    env_file:
+      - .env
+    environment:
+      PROJECT_NAME: CyberFans
+      TZ: "Asia/Ho_Chi_Minh"
+    ports:
+      - "8006:8006"
+    command: ["uvicorn", "tts-server:app", "--host", "0.0.0.0", "--port", "8006"]
+    restart: unless-stopped
+

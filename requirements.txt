@@ -1,0 +1,17 @@
+aiortc
+fastapi
+uvicorn
+websockets
+coqui-tts
+loguru
+numpy
+scipy
+whisperx
+python-multipart
+opuslib
+mutagen
+torch
+torchaudio
+transformers
+accelerate
+python-dotenv==0.21.0  
